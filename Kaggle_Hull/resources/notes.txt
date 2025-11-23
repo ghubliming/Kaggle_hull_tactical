@@ -1,0 +1,3 @@
+model 7 is fake.
+Market prediction is cheating too.
+Ensemble works in submit, LL not work. But they are same approach.
