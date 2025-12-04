@@ -90,6 +90,11 @@ class MetaConfig:
     CAT_LR = 0.01
     CAT_DEPTH = 6
     
+    # --- Thresholds & Exposures (Models 4 & 5) ---
+    M4_ALPHA = 0.80007
+    M5_ALPHA = 0.60013
+    M5_TAU = 9.437e-05
+    
     # --- Ensemble Weights (The Fix for Silent Model 3) ---
     # Default to equal weights initially
     WEIGHTS = [0.16, 0.16, 0.2, 0.16, 0.16, 0.16]
@@ -184,22 +189,79 @@ model_3.fit(X_train, y_train)
 print("Model 3 Training Complete.")
 
 # ==========================================
-# 4. ENSEMBLE WEIGHT OPTIMIZATION (The Fix)
+# 4. THRESHOLD OPTIMIZATION (Phase 2)
 # ==========================================
 try:
-    print("Phase 2: Tuning Ensemble Weights (Unlocking Model 3)...")
+    print("Phase 2: Tuning Thresholds & Exposures (Models 4 & 5)...")
+    # Use the same validation set as will be used for weights
+    # pred_m3_val = model_3.predict(X_test) # We need this for tuning
+    # Note: We'll calculate it once here to save time
+    
+    pred_m3_val = model_3.predict(X_test)
+    
+    def objective_thresholds(trial):
+        # Tune M4 Alpha
+        m4_alpha = trial.suggest_float('m4_alpha', 0.5, 1.5)
+        
+        # Tune M5 Params
+        m5_alpha = trial.suggest_float('m5_alpha', 0.4, 1.2)
+        m5_tau = trial.suggest_float('m5_tau', 1e-5, 5e-4, log=True)
+        
+        # Construct Predictions
+        # M4 Logic
+        p4 = np.clip([m4_alpha if x > 0 else 0.0 for x in pred_m3_val], 0.0, 2.0)
+        
+        # M5 Logic
+        p5 = np.clip([m5_alpha if x > m5_tau else 0.0 for x in pred_m3_val], 0.0, 2.0)
+        
+        # Combine (Simple average for the objective just to find good individual params)
+        # Or better: minimize MSE of each individually against y_test
+        
+        mse_m4 = np.mean((p4 - y_test.values)**2)
+        mse_m5 = np.mean((p5 - y_test.values)**2)
+        
+        # We want to minimize both, so sum them
+        return mse_m4 + mse_m5
+
+    if 'optuna' in locals():
+        study_thresh = optuna.create_study(direction='minimize')
+        study_thresh.optimize(objective_thresholds, n_trials=20)
+        
+        MetaConfig.M4_ALPHA = study_thresh.best_params['m4_alpha']
+        MetaConfig.M5_ALPHA = study_thresh.best_params['m5_alpha']
+        MetaConfig.M5_TAU = study_thresh.best_params['m5_tau']
+        print(f"Phase 2 Complete. M4_ALPHA={MetaConfig.M4_ALPHA:.3f}, M5_TAU={MetaConfig.M5_TAU:.2e}")
+    else:
+        print("Optuna not available, skipping threshold tuning.")
+
+except Exception as e:
+    print(f"Threshold Tuning Failed ({e}). Using Defaults.")
+
+
+# ==========================================
+# 5. ENSEMBLE WEIGHT OPTIMIZATION (Phase 3)
+# ==========================================
+try:
+    print("Phase 3: Tuning Ensemble Weights...")
     
     # Generate Predictions on Hold-out Set (Validation)
     # Note: We use X_test/y_test defined earlier
     
-    # Raw Model 3 Preds
-    pred_m3 = model_3.predict(X_test)
+    # Raw Model 3 Preds (Re-use if available, else predict)
+    if 'pred_m3_val' not in locals():
+        pred_m3 = model_3.predict(X_test)
+    else:
+        pred_m3 = pred_m3_val
     
-    # Construct M1, M4, M5, M6 based on M3 (Heuristics)
-    # This mirrors the logic in the predict() functions
+    # Construct M1, M4, M5, M6 based on M3 using NEW TUNED PARAMS
     pred_m1 = np.where(pred_m3 > 0, 2.0, 0.0)
-    pred_m4 = np.clip([0.8 if x > 0 else 0.0 for x in pred_m3], 0.0, 2.0)
-    pred_m5 = np.clip([0.6 if x > 9.43e-5 else 0.0 for x in pred_m3], 0.0, 2.0)
+    
+    # M4 uses MetaConfig.M4_ALPHA
+    pred_m4 = np.clip([MetaConfig.M4_ALPHA if x > 0 else 0.0 for x in pred_m3], 0.0, 2.0)
+    
+    # M5 uses MetaConfig.M5_ALPHA and M5_TAU
+    pred_m5 = np.clip([MetaConfig.M5_ALPHA if x > MetaConfig.M5_TAU else 0.0 for x in pred_m3], 0.0, 2.0)
+    
     pred_m6 = np.array([0.09 if x > 0 else 0.0 for x in pred_m3])
     
     # M2 Fallback (Since we might lack external signal in validation)
@@ -238,25 +300,21 @@ except Exception as e:
 MIN_INVESTMENT = 0.0
 MAX_INVESTMENT = 2.0
 
-# ---- Fixed best parameter from optimization ----
-ALPHA_BEST_m4 = 0.80007  # exposure on positive days
-
+# ---- M4: Dynamic Exposure ----
 def exposure_for_m4(r: float) -> float:
     if r <= 0.0:
         return 0.0
-    return ALPHA_BEST_m4
+    return MetaConfig.M4_ALPHA
 
-# ---- Best parameters from Optuna ----
-ALPHA_BEST_m5 = 0.6001322487531852
+# ---- M5: Dynamic Exposure & Threshold ----
 USE_EXCESS_m5 = False
-TAU_ABS_m5    = 9.437170708744412e-05  # ≈ 0.01%
 
 def exposure_for_m5(r: float, rf: float = 0.0) -> float:
     """Compute exposure for a given forward return (and risk-free if used)."""
     signal = (r - rf) if USE_EXCESS_m5 else r
-    if signal <= TAU_ABS_m5:
+    if signal <= MetaConfig.M5_TAU:
         return 0.0
-    return ALPHA_BEST_m5
+    return MetaConfig.M5_ALPHA
 
 MIN_SIGNAL:        float = 0.0                  # Minimum value for the daily signal 
 MAX_SIGNAL:        float = 2.0                  # Maximum value for the daily signal 
