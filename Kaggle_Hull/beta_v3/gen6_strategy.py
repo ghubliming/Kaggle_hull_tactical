@@ -68,13 +68,13 @@ def preprocessing(data, typ):
 
     return data
 
-train = preprocessing(train, "train")
-
 # --- CRITICAL FIX 1: STRICT TIME-SERIES SPLIT ---
 # Do NOT shuffle. We must train on past, validate on future.
 # Sorting by date_id if it exists to be safe, though usually train.csv is sorted.
 if 'date_id' in train.columns:
     train = train.sort_values('date_id').reset_index(drop=True)
+
+train = preprocessing(train, "train")
 
 split_idx = int(len(train) * 0.99) # Validating on last 1%
 train_split = train.iloc[:split_idx]
@@ -128,115 +128,85 @@ try:
         
         # Eval using LGBM as proxy or light ensemble on the Time-Series Split
         # We strictly train on X_train and evaluate on X_val
-        model = LGBMRegressor(
-            learning_rate=lgbm_lr,
-            num_leaves=lgbm_leaves,
-            n_estimators=300,
-            verbosity=-1,
-            random_state=42
-        )
-        
+        model = LGBMRegressor(learning_rate=lgbm_lr, num_leaves=lgbm_leaves, n_estimators=50, verbosity=-1)
         model.fit(X_train, y_train)
         preds = model.predict(X_val)
         return np.mean((preds - y_val)**2)
 
     study_hyp = optuna.create_study(direction='minimize')
-    study_hyp.optimize(objective_hyperparams, n_trials=15) # Reduced trials for speed
+    study_hyp.optimize(objective_hyperparams, n_trials=20) # Short run
     
-    # Update Config
-    p = study_hyp.best_params
-    MetaConfig.LGBM_LR = p['lgbm_lr']
-    MetaConfig.LGBM_LEAVES = p['lgbm_leaves']
-    MetaConfig.XGB_LR = p['xgb_lr']
-    MetaConfig.XGB_DEPTH = p['xgb_depth']
-    MetaConfig.CAT_LR = p['cat_lr']
-    MetaConfig.CAT_DEPTH = p['cat_depth']
+    MetaConfig.LGBM_LR = study_hyp.best_params['lgbm_lr']
+    MetaConfig.LGBM_LEAVES = study_hyp.best_params['lgbm_leaves']
+    MetaConfig.XGB_LR = study_hyp.best_params['xgb_lr']
+    MetaConfig.XGB_DEPTH = study_hyp.best_params['xgb_depth']
+    MetaConfig.CAT_LR = study_hyp.best_params['cat_lr']
+    MetaConfig.CAT_DEPTH = study_hyp.best_params['cat_depth']
     
-    print("Phase 1 Complete. Tuned Params found.")
-
-except ImportError:
-    print("Optuna not found. Using Defaults.")
+    print("Phase 1 Complete. Best Params:", study_hyp.best_params)
+    
 except Exception as e:
-    print(f"Tuning failed ({e}). Using Defaults.")
+    print(f"Hyperparam Tuning Failed ({e}). Using Defaults.")
 
 # ==========================================
 # 3. MODEL TRAINING (With Tuned Params)
 # ==========================================
 
-# Dynamic Param Injection
-lgbm_params = {"n_estimators": 1500, "learning_rate": MetaConfig.LGBM_LR, "num_leaves": MetaConfig.LGBM_LEAVES, 
-               "max_depth": 8, "reg_alpha": 1.0, "reg_lambda": 1.0, "random_state": 42, 'verbosity': -1}
+# 1. LGBM
+model_lgbm = LGBMRegressor(learning_rate=MetaConfig.LGBM_LR, num_leaves=MetaConfig.LGBM_LEAVES, n_estimators=500, verbosity=-1)
+model_lgbm.fit(X_train, y_train)
 
-xgb_params = {"n_estimators": 1500, "learning_rate": MetaConfig.XGB_LR, "max_depth": MetaConfig.XGB_DEPTH, 
-              "subsample": 0.8, "colsample_bytree": 0.7, "reg_alpha": 1.0, "reg_lambda": 1.0, "random_state": 42}
+# 2. XGBoost
+model_xgb = XGBRegressor(learning_rate=MetaConfig.XGB_LR, max_depth=MetaConfig.XGB_DEPTH, n_estimators=500)
+model_xgb.fit(X_train, y_train)
 
-cat_params = {'iterations': 3000, 'learning_rate': MetaConfig.CAT_LR, 'depth': MetaConfig.CAT_DEPTH, 
-              'l2_leaf_reg': 5.0, 'min_child_samples': 100, 'colsample_bylevel': 0.7, 'od_wait': 100, 
-              'random_state': 42, 'od_type': 'Iter', 'bootstrap_type': 'Bayesian', 'grow_policy': 'Depthwise', 
-              'logging_level': 'Silent', 'loss_function': 'MultiRMSE'}
+# 3. CatBoost
+model_cat = CatBoostRegressor(learning_rate=MetaConfig.CAT_LR, depth=MetaConfig.CAT_DEPTH, iterations=500, verbose=0)
+model_cat.fit(X_train, y_train)
 
-CatBoost = CatBoostRegressor(**cat_params)
-XGBoost = XGBRegressor(**xgb_params)
-LGBM = LGBMRegressor(**lgbm_params)
-RandomForest = RandomForestRegressor(n_estimators=100, max_depth=15, random_state=42)
-ExtraTrees = ExtraTreesRegressor(n_estimators=100, max_depth=12, random_state=42)
-GBRegressor = GradientBoostingRegressor(learning_rate=0.1, max_depth=8, random_state=10)
-
-estimators = [('CatBoost', CatBoost), ('XGBoost', XGBoost), ('LGBM', LGBM), 
-              ('RandomForest', RandomForest), ('ExtraTrees', ExtraTrees), ('GBRegressor', GBRegressor)]
-
-print("Training Main Stacking Ensemble...")
-
-# --- CRITICAL FIX 2: TIME-SERIES SAFE CV ---
-# TimeSeriesSplit creates "gaps" that StackingRegressor hates.
-# KFold(shuffle=False) is the robust alternative. 
-# It does NOT shuffle, preserving the order of the time series indices.
-# It is a "Block" CV which is acceptable for Stacking and won't crash.
-cv_safe = KFold(n_splits=3, shuffle=False)
-
-model_3 = StackingRegressor(
-    estimators, 
-    final_estimator=RidgeCV(alphas=[0.1, 1.0, 10.0]), 
-    cv=cv_safe, # Changed from tscv to cv_safe
-    n_jobs=-1
-)
-
-# Fit on the main training split
+# 4. Stacking (The "Meta-Learner")
+estimators = [
+    ('lgbm', model_lgbm),
+    ('xgb', model_xgb),
+    ('cat', model_cat)
+]
+model_3 = StackingRegressor(estimators=estimators, final_estimator=LinearRegression())
 model_3.fit(X_train, y_train)
-print("Model 3 Training Complete.")
+
+print("Base Models & Stacking Regressor Trained.")
 
 # ==========================================
 # 4. THRESHOLD OPTIMIZATION (Phase 2)
 # ==========================================
 try:
-    print("Phase 2: Tuning Thresholds & Exposures (Models 4 & 5)...")
+    print("Phase 2: Tuning Activation Thresholds (Models 4 & 5)...")
     
-    # Generate OOF-like predictions on the Validation Set (X_val)
-    # These were NOT seen during training (because of the strict split)
-    pred_m3_val = model_3.predict(X_val)
+    # We need predictions on Validation set to tune thresholds
+    pred_val = model_3.predict(X_val)
     
     def objective_thresholds(trial):
-        # Tune M4 Alpha
-        m4_alpha = trial.suggest_float('m4_alpha', 0.5, 1.5)
+        m4_a = trial.suggest_float('m4_alpha', 0.1, 1.5)
+        m5_a = trial.suggest_float('m5_alpha', 0.1, 1.5)
+        m5_t = trial.suggest_float('m5_tau', 0.0, 0.005)
         
-        # Tune M5 Params
-        m5_alpha = trial.suggest_float('m5_alpha', 0.4, 1.2)
-        m5_tau = trial.suggest_float('m5_tau', 1e-5, 5e-4, log=True)
+        # Calculate PnL proxy on validation
+        # Logic: We want to maximize returns, minimizing error isn't exactly the same but let's stick to MSE for stability
+        # or negative correlation? Let's minimize MSE of the constrained signals against returns
         
-        # M4 Logic
-        p4 = np.clip([m4_alpha if x > 0 else 0.0 for x in pred_m3_val], 0.0, 2.0)
+        # Simplified: Just fit to y_val
+        p4 = np.clip([m4_a if x > 0 else 0.0 for x in pred_val], 0, 2.0)
+        p5 = np.clip([m5_a if x > m5_t else 0.0 for x in pred_val], 0, 2.0)
         
-        # M5 Logic
-        p5 = np.clip([m5_alpha if x > m5_tau else 0.0 for x in pred_m3_val], 0.0, 2.0)
+        # Let's say we want the ensemble of these two to be close to y_val (scaled)
+        # This is a bit heuristic. In real trading we maximize Sharpe. 
+        # Here we just minimize squared error to the target.
         
-        mse_m4 = np.mean((p4 - y_val.values)**2)
-        mse_m5 = np.mean((p5 - y_val.values)**2)
-        
-        return mse_m4 + mse_m5
+        combined = (p4 + p5) / 2.0
+        return np.mean((combined - y_val)**2)
 
     if 'optuna' in locals():
         study_thresh = optuna.create_study(direction='minimize')
-        study_thresh.optimize(objective_thresholds, n_trials=20)
+        study_thresh.optimize(objective_thresholds, n_trials=30)
         
         MetaConfig.M4_ALPHA = study_thresh.best_params['m4_alpha']
         MetaConfig.M5_ALPHA = study_thresh.best_params['m5_alpha']
