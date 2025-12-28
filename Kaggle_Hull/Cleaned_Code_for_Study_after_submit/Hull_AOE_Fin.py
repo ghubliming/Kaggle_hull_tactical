@@ -1,21 +1,34 @@
 """
-Hull Tactical - Gen5 "Lean & Fast" + Meta-Learning
+Module: Hull_AOE_Fin
+Description:
+    Implements a hybrid machine learning strategy combining linear and tree-based models 
+    with online learning capabilities. The system features dynamic feature engineering 
+    and adaptive regime detection.
 
-Strategy Update: Gen5
-This script implements the "Lean & Fast" optimization with an added Meta-Learning layer.
+Technical Architecture:
+    1. Configuration:
+        - Dynamic configuration class capable of runtime updates via Optuna.
+        - Defines window sizes for volatility, EMA, and model parameters.
 
-Core Upgrades:
-1.  **Automated Hyperparameter Optimization (HPO):** 
-    Tries to use `optuna` if available. Falls back to robust Gen5 defaults if offline.
-2.  **Walk-Forward Validation:** 
-    Optimizes on a validation set while keeping a strict hold-out set for final testing.
-3.  **Dynamic Feature Engineering:** 
-    Feature windows (e.g., Volatility lookback) are no longer hardcoded; they adapt based on findings.
-4.  **"Flash" Regime Detection:** 
-    Optimizes the ratio between short-term and long-term volatility to switch between 
-    Aggressive and Defensive modes instantly.
+    2. Feature Engineering:
+        - Technical indicators: EMA, RSI, MACD.
+        - Volatility measures: Short, Long, Quarterly windows.
+        - Regime features: Volatility ratios and flash crash signals.
+        - Dynamic Rolling Scaling: Z-score normalization using a rolling window.
 
-Author: (Converted from Hull_AOE_Fin.ipynb)
+    3. Optimization (Meta-Learning):
+        - Uses Optuna to optimize feature lookback windows and LGBM hyperparameters 
+        - Validates using TimeSeriesSplit.
+
+    4. Model Training:
+        - Linear Model: SGDRegressor with online partial_fit capabilities.
+        - Tree Model: LGBMRegressor for capturing non-linear relationships.
+        - Uses rolling Z-scores for the linear model and raw features for the tree model.
+
+    5. Inference & Online Learning:
+        - Adaptive Ensemble: Dynamically weights linear vs. tree models based on volatility regimes.
+        - Online Learning: Updates the SGDRegressor incrementally with revealed targets.
+        - Risk Control: Adjusts allocation based on forecasted Sharpe ratio and RSI.
 """
 
 import os
@@ -252,12 +265,12 @@ else:
     print("Skipping optimization (Offline/Rerun). Using Gen5 Defaults.")
 
 # -----------------------------------------------------------------------------------------
-# 5. FINAL MODEL TRAINING (FIXED)
+# 5. FINAL MODEL TRAINING
 # -----------------------------------------------------------------------------------------
 # Re-generate features with potentially updated Config
 train_df = feature_engineering(raw_train_df)
 
-# --- FIX START: ROLLING SCALING ---
+# Pre-calculate rolling Z-scores for stationarity
 # Instead of global scaling, we pre-calculate rolling Z-scores for the entire history.
 # This ensures training inputs are stationary (relative to their recent past).
 feature_cols = [c for c in train_df.columns if c not in DROP_COLS]
@@ -269,7 +282,6 @@ train_df_scaled = (train_df[feature_cols] - rolling_mean) / (rolling_std + 1e-8)
 
 # Fill initial NaNs (where window wasn't full yet) with 0
 train_df_scaled = train_df_scaled.fillna(0)
-# --- FIX END ---
 
 # Slice for training (removing warmup period)
 # We use the scaled features for Linear Model, raw features for Tree Model
@@ -298,7 +310,7 @@ lgbm_model.fit(X_raw, y)
 print("Gen5 Models Ready (Regime Fix Applied).")
 
 # -----------------------------------------------------------------------------------------
-# 6. INFERENCE LOOP (FIXED & ONLINE LEARNING)
+# 6. INFERENCE LOOP (ONLINE LEARNING)
 # -----------------------------------------------------------------------------------------
 
 # GLOBAL_HISTORY needs to be large enough for the rolling window
@@ -376,7 +388,7 @@ def predict(test_pl: pl.DataFrame) -> float:
     
     GLOBAL_HISTORY = pd.concat([GLOBAL_HISTORY, test_df_raw], axis=0, ignore_index=True)
     
-    # --- FIX START: FILL REVEALED TARGETS ---
+    # Fill revealed targets for online learning context
     if STEP > 0:
         # The API gives us the answer for the PREVIOUS day in 'lagged_forward_returns'
         # We must put this answer into our history so 'shift(1)' works tomorrow.
@@ -386,13 +398,12 @@ def predict(test_pl: pl.DataFrame) -> float:
         if 'forward_returns' in GLOBAL_HISTORY.columns:
             col_idx = GLOBAL_HISTORY.columns.get_loc('forward_returns')
             GLOBAL_HISTORY.iloc[-2, col_idx] = revealed_prev_return
-    # --- FIX END ---
     
     # 2. Features (Raw)
     full_features = feature_engineering(GLOBAL_HISTORY)
     current_features_raw = full_features.iloc[[-1]][FEATURES]
     
-    # --- FIX START: DYNAMIC ROLLING SCALING ---
+    # Compute dynamic rolling scaling for current step
     # We must compute the scaling relative to the SPECIFIC history at this moment.
     # Calculate rolling stats on the updated history
     rolling_mean = full_features[FEATURES].rolling(window=Config.SCALING_WINDOW, min_periods=30).mean()
@@ -403,7 +414,6 @@ def predict(test_pl: pl.DataFrame) -> float:
     
     # Select just the last row (the current prediction step)
     curr_X_scaled = full_features_scaled.iloc[[-1]].fillna(0)
-    # --- FIX END ---
 
     # 3. Prediction
     # Linear model gets the Rolling Z-Score input
@@ -435,7 +445,7 @@ def predict(test_pl: pl.DataFrame) -> float:
         
     allocation = np.clip(1.0 + (sign * allocation_size), 0.0, 2.0)
     
-    # 6. Online Learning (FIXED ALIGNMENT)
+    # 6. Online Learning Update
     # This is where the model learns from the *previous* day's outcome
     try:
         prev_target = test_df_raw['lagged_forward_returns'].values[0]

@@ -1,27 +1,30 @@
-"Hull Tactical Market Prediction (Gen6 Full Meta-Learning)
-Strategy Upgrade: "The Adaptive Ensemble"
+"""
+Module: EOS_beta_v1
+Description:
+    Implements a meta-learning pipeline for market prediction using a stacked ensemble approach.
+    The pipeline consists of three optimization phases to tune hyperparameters, thresholds, and 
+    ensemble weights using Optuna, followed by a dynamic inference server.
 
-This script implements a full Meta-Learning Pipeline to resolve the "Frozen Weights" issue
-observed in previous iterations.
+Technical Architecture:
+    1. Data Preprocessing:
+        - Loads train/test data.
+        - Handles missing values and selects feature columns (E*, S*, P*).
+        - Performs strict time-series splitting for validation.
 
-Key Components:
-1.  **Hyperparameter Optimization (Phase 1):**
-    Uses Optuna to simultaneously tune LightGBM, XGBoost, and CatBoost parameters on a
-    strict time-series split to prevent look-ahead bias.
+    2. Optimization Phases (Optuna):
+        - Phase 1: Hyperparameter tuning for base models (LGBM, XGBoost, CatBoost).
+        - Phase 2: Threshold optimization for heuristic sub-models (Models 4 & 5).
+        - Phase 3: Ensemble weight optimization for the final linear combination of 6 sub-models.
 
-2.  **Threshold & Exposure Optimization (Phase 2):**
-    Optimizes the "aggressiveness" of the strategy by tuning exposure levels (`alpha`)
-    and activation thresholds (`tau`) for specific heuristic models (Models 4 & 5).
+    3. Modeling:
+        - Base Models: LightGBM, XGBoost, CatBoost Regressors.
+        - Meta-Learner: StackingRegressor with LinearRegression final estimator.
+        - Heuristic Models: Custom logic based on prediction thresholds and alpha exposure.
 
-3.  **Ensemble Weight Optimization (Phase 3):**
-    Instead of hardcoded weights, this phase runs an optimization loop to find the
-    optimal mixing weights for the 6-model ensemble based on validation set performance.
-
-4.  **Dynamic Inference:**
-    The final prediction engine uses these learned weights and parameters.
-
-Author: (Converted from EOS_beta_v1.ipynb)
-""
+    4. Inference:
+        - Implements a Kaggle inference server.
+        - Generates predictions using the optimized weighted ensemble.
+"""
 
 import os
 import pandas as pd
@@ -113,7 +116,7 @@ def preprocessing(data, typ):
 
     return data
 
-# --- CRITICAL FIX 1: STRICT TIME-SERIES SPLIT ---
+# Time-Series Split Configuration
 # Do NOT shuffle. We must train on past, validate on future.
 # Sorting by date_id if it exists to be safe, though usually train.csv is sorted.
 if 'date_id' in train.columns:
