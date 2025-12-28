@@ -1,5 +1,5 @@
 """
-Module: EOS_beta_v1
+Module: EOS_beta
 Description:
     Implements a meta-learning pipeline for market prediction using a stacked ensemble approach.
     The pipeline consists of three optimization phases to tune hyperparameters, thresholds, and 
