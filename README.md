@@ -10,3 +10,6 @@ https://www.kaggle.com/competitions/hull-tactical-market-prediction/leaderboard
 
 2nd time: 653/3340, 2.39 alpha model, 0.781 beta model
 This leaderboard is calculated with approximately 14% of the test data. The final results will be based on the other 86%, so the final standings may be different.
+
+3rd time: 662/3330, 0.331 alpha model, -0.404 beta model 
+20% of the test data.
