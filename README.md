@@ -8,8 +8,11 @@ https://www.kaggle.com/competitions/hull-tactical-market-prediction/leaderboard
 ## Update LB logging:
 1st time around ~2000/3340 with ~8% data, 1.90 alpha model, 0.95 for beta model
 
-2nd time: 653/3340, 2.39 alpha model, 0.781 beta model
+2nd time, February 19: 653/3340, 2.39 alpha model, 0.781 beta model
 This leaderboard is calculated with approximately 14% of the test data. The final results will be based on the other 86%, so the final standings may be different.
 
-3rd time: 662/3330, 0.331 alpha model, -0.404 beta model 
+3rd time, March 23 662/3330, 0.331 alpha model, -0.404 beta model 
 20% of the test data.
+
+4th time, April 20: 751 / 3309. A: 0.864; B: 0.744
+This leaderboard is calculated with approximately 67% of the test data. The final results will be based on the other 33%, so the final standings may be different.
