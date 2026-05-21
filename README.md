@@ -16,3 +16,10 @@ This leaderboard is calculated with approximately 14% of the test data. The fina
 
 4th time, April 20: 751 / 3309. A: 0.864; B: 0.744
 This leaderboard is calculated with approximately 67% of the test data. The final results will be based on the other 33%, so the final standings may be different.
+
+5th. 
+May 21 — Update: The fourth leaderboard refresh is complete.
+
+This leaderboard is calculated with approximately 86% of the test data. The final results will be based on the other 33%, so the final standings may be different.
+
+"1366- A1.236 B0.659"
