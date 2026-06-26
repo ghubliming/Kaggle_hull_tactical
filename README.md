@@ -23,3 +23,6 @@ May 21 — Update: The fourth leaderboard refresh is complete.
 This leaderboard is calculated with approximately 86% of the test data. The final results will be based on the other 33%, so the final standings may be different.
 
 "1366/3302 - A1.236 B0.659"
+
+Final
+1124/3294 A 1.511 B 0.606 
